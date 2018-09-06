@@ -30,12 +30,13 @@ time_t simpleDSTadjust::time(char **abbrev)
     dstYear=year;
     dstStart = calcTime(&dstStartRule);
     dstEnd = calcTime(&dstEndRule);
-	
+	/*
     Serial.println("\nDST Rules Updated:");
     Serial.print("DST Start: ");
     Serial.print(ctime(&dstStart));
     Serial.print("DST End:   ");
     Serial.println(ctime(&dstEnd));
+	*/
    }
 
  bool northTZ = (dstEnd>dstStart)?1:0; // Northern or Southern hemisphere TZ?
