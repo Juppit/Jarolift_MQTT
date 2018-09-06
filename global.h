@@ -28,7 +28,7 @@
 #define TIMEZONE               +1                 // difference localtime to UTC/GMT in hours
 
 struct dstRule StartRule = {"CEST", Last, Sun, Mar, 2, 3600}; // Daylight time
-struct dstRule EndRule = {"CET", Last, Sun, Oct, 2, 0};       // Standard time
+struct dstRule EndRule   = {"CET", Last, Sun, Oct, 2, 0};     // Standard time
 simpleDSTadjust dstAdjusted(StartRule, EndRule);  // Setup simpleDSTadjust Library rules
 
 ESP8266WebServer server(80);                      // The Webserver
@@ -103,6 +103,19 @@ void InitLog()
 } // void InitLog
 
 //####################################################################
+// Function to log date + time to serial
+//####################################################################
+void LogTime()
+{
+    char *dstAbbrev;
+    time_t now = dstAdjusted.time(&dstAbbrev);
+    struct tm * timeinfo = localtime(&now);
+    char buffer[30];
+    strftime (buffer, 30, "%Y-%m-%d %T", timeinfo);
+    Serial.print((String)buffer + " ");
+} // void LogTime
+
+//####################################################################
 // Function to write Log to both, serial and Weblog
 //####################################################################
 void WriteLog(String msg, boolean new_line = false)
@@ -119,8 +132,10 @@ void WriteLog(String msg, boolean new_line = false)
     struct tm * timeinfo = localtime(&now);
     char buffer[30];
     strftime (buffer, 30, "%Y-%m-%d %T", timeinfo);
-    web_log_message[web_log_message_nextfree] = (String)buffer + " " + dstAbbrev + " " + msg;
-    Serial.print((String)buffer + " " + dstAbbrev + " " + msg);
+    //web_log_message[web_log_message_nextfree] = (String)buffer + " " + dstAbbrev + " " + msg;
+    //Serial.print((String)buffer + " " + dstAbbrev + " " + msg);
+    web_log_message[web_log_message_nextfree] = (String)buffer + " " + msg;
+    Serial.print((String)buffer + " " + msg);
     web_log_message_newline = false;
   } else {
     web_log_message[web_log_message_nextfree] += " " + msg;
@@ -226,7 +241,7 @@ void WriteConfig()
 //####################################################################
 boolean ReadConfig()
 {
-  WriteLog("[INFO] - read config from EEPROM . . .", false);
+  WriteLog("[INFO] - read config from EEPROM...", false);
   config.cfgVersion = 0;
 
   if (EEPROM.read(120) == 'C' && EEPROM.read(121) == 'F'  && EEPROM.read(122) == 'G' )
@@ -382,14 +397,6 @@ void InitializeConfigData()
     WriteConfig();
   }
 } // void InitializeConfigData
-
-//####################################################################
-// Callback function for Ticker
-//####################################################################
-void Admin_Mode_Timeout()
-{
-  AdminTimeOutCounter++;
-} // void Admin_Mode_Timeout
 
 //####################################################################
 // Callback function for LED HeartBeat
