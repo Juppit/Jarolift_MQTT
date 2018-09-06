@@ -51,6 +51,9 @@
 #include <simpleDSTadjust.h>
 #include <coredecls.h>              // settimeofday_cb()
 
+#include <ESP8266mDNS.h>
+#include <ArduinoOTA.h>
+
 #include "helpers.h"
 #include "global.h"
 #include "html_api.h"
@@ -61,6 +64,9 @@ extern "C" {
 #include "cc1101.h"
 #include <KeeloqLib.h>
 }
+
+// host name used for OTA and mDNS
+#define host_name "esp8266"
 
 // Number of seconds after reset during which a
 // subseqent reset will be considered a double reset.
@@ -73,47 +79,38 @@ extern "C" {
 #define Lowpulse         400    // Defines pulse-width in microseconds. Adapt for your use...
 #define Highpulse        800
 
-#define BITS_SIZE          8
-byte syncWord            = 199;
-int device_key_msb       = 0x0; // stores cryptkey MSB
-int device_key_lsb       = 0x0; // stores cryptkey LSB
-uint64_t button          = 0x0; // 1000=0x8 up, 0100=0x4 stop, 0010=0x2 down, 0001=0x1 learning
-int disc                 = 0x0;
-uint32_t dec             = 0;   // stores the 32Bit encrypted code
-uint64_t pack            = 0;   // Contains data to send.
+uint32_t device_key_msb       = 0x0; // stores cryptkey MSB
+uint32_t device_key_lsb       = 0x0; // stores cryptkey LSB
+
 byte disc_low[16]        = {0x1, 0x2, 0x4, 0x8, 0x10, 0x20, 0x40, 0x80, 0x0, 0x0, 0x0, 0x0, 0x0,  0x0,  0x0,  0x0};
 byte disc_high[16]       = {0x0, 0x0, 0x0, 0x0, 0x0,  0x0,  0x0,  0x0, 0x1, 0x2, 0x4, 0x8, 0x10, 0x20, 0x40, 0x80};
 byte serials[16]         = {0x0, 0x1, 0x2, 0x3, 0x4,  0x5,  0x6,  0x7, 0x8, 0x9, 0xA, 0xB, 0xC,  0xD,  0xE,  0xF }; // Represents last serial digit in binary 1234567[8] = 0xF
-byte disc_l              = 0;
-byte disc_h              = 0;
 byte adresses[]          = {5, 11, 17, 23, 29, 35, 41, 47, 53, 59, 65, 71, 77, 85, 91, 97 }; // Defines start addresses of channel data stored in EEPROM 4bytes s/n.
-uint64_t new_serial      = 0;
-byte marcState;
-int MqttRetryCounter = 0;                 // Counter for MQTT reconnect
+
+// Commands
+#define CMD_UP    0x8
+#define CMD_STOP  0x4
+#define CMD_DOWN  0x2
+#define CMD_LEARN 0x1
+
+char commands[16][8] {"0","learn","down","3","stop","5","6","7","up","9","up+down","11","12","13","14","15"};
 
 // RX variables and defines
 #define debounce         200              // Ignoring short pulses in reception... no clue if required and if it makes sense ;)
-#define pufsize          216              // Pulsepuffer
+#define bufsize          216              // Pulsebuffer
 #define TX_PORT            4              // Outputport for transmission
 #define RX_PORT            5              // Inputport for reception
-uint32_t rx_serial       = 0;
-char rx_serial_array[8]  = {0};
-char rx_disc_low[8]      = {0};
-char rx_disc_high[8]     = {0};
-uint32_t rx_hopcode      = 0;
-uint16_t rx_disc_h       = 0;
-byte rx_function         = 0;
-int rx_device_key_msb    = 0x0;           // stores cryptkey MSB
-int rx_device_key_lsb    = 0x0;           // stores cryptkey LSB
-volatile uint32_t decoded         = 0x0;  // decoded hop code
+
+uint32_t rx_device_key_msb    = 0x0;           // stores cryptkey MSB
+uint32_t rx_device_key_lsb    = 0x0;           // stores cryptkey LSB
+
 volatile byte pbwrite;
-volatile unsigned int lowbuf[pufsize];    // ring buffer storing LOW pulse lengths
-volatile unsigned int hibuf[pufsize];     // ring buffer storing HIGH pulse lengths
-volatile bool iset = false;
-volatile byte value = 0;                  // Stores RSSI Value
-long rx_time;
-int steadycnt = 0;
+volatile uint32_t lowbuf[bufsize];    // ring buffer storing LOW pulse lengths
+volatile uint32_t highbuf[bufsize];   // ring buffer storing HIGH pulse lengths
+volatile bool rx_full = false;             // flag for buffer is full
+
 boolean time_is_set_first = true;
+
 DoubleResetDetector drd(DRD_TIMEOUT, DRD_ADDRESS);
 CC1101 cc1101;                            // The connection to the hardware chip CC1101 the RF Chip
 
@@ -125,13 +122,14 @@ void ICACHE_RAM_ATTR radio_rx_measure();
 //####################################################################
 void setup()
 {
+  byte syncWord = 199;
   InitLog();
   EEPROM.begin(4096);
   Serial.begin(115200);
   settimeofday_cb(time_is_set);
   updateNTP(); // Init the NTP time
   WriteLog("[INFO] - starting Jarolift Dongle " + (String)PROGRAM_VERSION, true);
-  WriteLog("[INFO] - ESP-ID " + (String)ESP.getChipId() + " // ESP-Core  " + ESP.getCoreVersion() + " // SDK Version " + ESP.getSdkVersion(), true);
+  WriteLog("[INFO] - ESP-ID " + (String)ESP.getChipId() + " // ESP-Core " + ESP.getCoreVersion() + " // SDK Version " + ESP.getSdkVersion(), true);
 
   // callback functions for WiFi connect and disconnect
   // placed as early as possible in the setup() function to get the connect
@@ -155,7 +153,7 @@ void setup()
   EEPROM.get(cntadr, devcnt);
 
   // initialize the transceiver chip
-  WriteLog("[INFO] - initializing the CC1101 Transceiver. If you get stuck here, it is probably not connected.", true);
+  WriteLog("[INFO] - initializing the CC1101 transceiver", true);
   cc1101.init();
   cc1101.setSyncWord(syncWord, false);
   cc1101.setCarrierFreq(CFREQ_433);
@@ -166,10 +164,10 @@ void setup()
   // test if the WLAN SSID is on default
   // or DoubleReset detected
   if ((drd.detectDoubleReset()) || (config.ssid == "MYSSID")) {
-    digitalWrite(led_pin, LOW);  // turn LED on                    // if yes then turn on LED
-    AdminEnabled = true;                                           // and go to Admin-Mode
+    digitalWrite(led_pin, LOW);  // if yes then turn on LED
+    AdminEnabled = true;         // and go to Admin-Mode
   } else {
-    digitalWrite(led_pin, HIGH); // turn LED off                   // turn LED off
+    digitalWrite(led_pin, HIGH); // turn LED off
   }
 
   // enable access point mode if Admin-Mode is enabled
@@ -196,35 +194,54 @@ void setup()
   server.onNotFound([]() {                              // If the client requests any URI
     if (!handleFileRead(server.uri())) {                // send it if it exists
       server.send(404, "text/plain", "404: Not Found"); // otherwise, respond with a 404 (Not Found) error
-      Serial.println(" File not found: did you upload the data directory?");
+      Serial.println(" File " + server.uri() + " not found: did you upload the data directory?");
     }
   });
 
   server.begin();
   WriteLog("[INFO] - HTTP server started", true);
   tkHeartBeat.attach(1, HeartBeat);
-
   // configure MQTT client
-  mqtt_client.setServer(IPAddress(config.mqtt_broker_addr[0], config.mqtt_broker_addr[1],
-                                  config.mqtt_broker_addr[2], config.mqtt_broker_addr[3]),
-                        config.mqtt_broker_port.toInt());
-  mqtt_client.setCallback(mqtt_callback);   // define Handler for incoming messages
-  mqttLastConnectAttempt = 0;
+  if (config.mqtt_broker_addr[0] + config.mqtt_broker_addr[1] + config.mqtt_broker_addr[2] + config.mqtt_broker_addr[3]) {
+    mqtt_client.setServer(IPAddress(config.mqtt_broker_addr[0], config.mqtt_broker_addr[1],
+                                    config.mqtt_broker_addr[2], config.mqtt_broker_addr[3]),
+                                    config.mqtt_broker_port.toInt());
+    mqtt_client.setCallback(mqtt_callback);   // define Handler for incoming messages
+    mqttLastConnectAttempt = 0;
+  }
 
-  pinMode(TX_PORT, OUTPUT); // TX Pin
-
-  // RX
+  // TX Pin
+  pinMode(TX_PORT, OUTPUT);
+  // RX Pin
   pinMode(RX_PORT, INPUT_PULLUP);
-  attachInterrupt(RX_PORT, radio_rx_measure, CHANGE); // Interrupt on change of RX_PORT
 
+  if (MDNS.begin(host_name)) {
+    WriteLog("[INFO] - mDNS server started for \"" + String(host_name) + ".local\" (MacOS and linux)", true);
+    // Add service to MDNS-SD
+    MDNS.addService("http", "tcp", 80);
+  }
+
+  ArduinoOTA.setHostname(host_name);
+  ArduinoOTA.onStart(otastart);
+  ArduinoOTA.begin();
+  WriteLog("[INFO] - OTA  server started for \"" + String(host_name) + "\"", true);
+
+  attachInterrupt(RX_PORT, radio_rx_measure, CHANGE); // Interrupt on change of RX_PORT
 } // void setup
+
+//####################################################################
+// Callback routine for OTA start
+//####################################################################
+void otastart()
+{
+  Serial.println("OTA started...");
+} // void otastart
 
 //####################################################################
 // main loop
 //####################################################################
 void loop()
 {
-
   // Call the double reset detector loop method every so often,
   // so that it can recognise when the timeout expires.
   // You can also call drd.stop() when you wish to no longer
@@ -245,73 +262,78 @@ void loop()
   }
   server.handleClient();
 
-  if (iset) {
+  // clear the flag if a message arrived at last loop
+  if (rx_full) {
     cc1101.cmdStrobe(CC1101_SCAL);
     delay(50);
     enterrx();
-    iset = false;
+    rx_full = false;
     delay(200);
     attachInterrupt(RX_PORT, radio_rx_measure, CHANGE); // Interrupt on change of RX_PORT
   }
 
-  // Check if RX buffer is full
-  if ((lowbuf[0] > 3650) && (lowbuf[0] < 4300) && (pbwrite >= 65) && (pbwrite <= 75)) {     // Decode received data...
-    if (debug_log_radio_receive_all)
-      WriteLog("[INFO] - received data", true);
-    iset = true;
-    ReadRSSI();
+  // check if first pulse is a header and RX buffer is full
+  if ((lowbuf[0] > 3650) && (lowbuf[0] < 4300) && (pbwrite >= 65) && (pbwrite <= 75)) {    // Decode received data...
+    byte value = ReadRSSI();
+    //    if (debug_log_radio_receive_all)
+    LogTime();
+    Serial.print("[INFO] - received data (RSSI: " + (String)value + ")");
+    rx_full = true;
     pbwrite = 0;
 
+    // encrypted code data
+    uint32_t rx_hopcode=0;
+    // fixed code data
+    uint32_t rx_serial=0;       // serial number
+    uint8_t  rx_function=0;     // button status
+    uint8_t  rx_disc_h=0;       //
+    // decoded data
+    uint32_t decoded;           // decoded hop code
+    uint16_t rx_counter=0;      // sync value
+    uint8_t rx_disc_low[4];
 
-    for (int i = 0; i <= 31; i++) {                          // extracting Hopcode
-      if (lowbuf[i + 1] < hibuf[i + 1]) {
+    for (int i = 0; i <= 31; i++) {                        // extracting Hopcode
+      if (lowbuf[i + 1] < highbuf[i + 1]) {
         rx_hopcode = rx_hopcode & ~(1 << i) | (0 << i);
       } else {
         rx_hopcode = rx_hopcode & ~(1 << i) | (1 << i);
       }
     }
-    for (int i = 0; i <= 27; i++) {                         // extracting Serialnumber
-      if (lowbuf[i + 33] < hibuf[i + 33]) {
+    for (int i = 0; i <= 27; i++) {                        // extracting Serialnumber
+      if (lowbuf[i + 33] < highbuf[i + 33]) {
         rx_serial = rx_serial & ~(1 << i) | (0 << i);
       } else {
         rx_serial = rx_serial & ~(1 << i) | (1 << i);
       }
     }
-    rx_serial_array[0] = (rx_serial >> 24) & 0xFF;
-    rx_serial_array[1] = (rx_serial >> 16) & 0xFF;
-    rx_serial_array[2] = (rx_serial >> 8) & 0xFF;
-    rx_serial_array[3] = rx_serial & 0xFF;
-
-    for (int i = 0; i <= 3; i++) {                        // extracting function code
-      if (lowbuf[61 + i] < hibuf[61 + i]) {
+    for (int i = 0; i <= 3; i++) {                         // extracting function code
+      if (lowbuf[61 + i] < highbuf[61 + i]) {
         rx_function = rx_function & ~(1 << i) | (0 << i);
       } else {
         rx_function = rx_function & ~(1 << i) | (1 << i);
       }
     }
-
-    for (int i = 0; i <= 7; i++) {                        // extracting high disc
-      if (lowbuf[65 + i] < hibuf[65 + i]) {
+    for (int i = 0; i <= 1; i++) {                         // extracting high disc
+      if (lowbuf[65 + i] < highbuf[65 + i]) {
         rx_disc_h = rx_disc_h & ~(1 << i) | (0 << i);
       } else {
         rx_disc_h = rx_disc_h & ~(1 << i) | (1 << i);
       }
     }
 
-    rx_disc_high[0] = rx_disc_h & 0xFF;
-    rx_keygen ();
-    rx_decoder();
-    if (rx_function == 0x4)steadycnt++;           // to detect a long press....
-    else steadycnt--;
-    if (steadycnt > 10 && steadycnt <= 40) {
-      rx_function = 0x3;
-      steadycnt = 0;
-    }
+    rx_keygen(rx_serial);                    // now create the deccrypt key from serial
+    decoded = rx_decoder(rx_hopcode);        // and decode the received hopcode
+    rx_counter = decoded & 0xFFFF;           // mask out the counter value
 
-    Serial.printf(" serialnumber: 0x%08x // function code: 0x%02x // disc: 0x%02x\n\n", rx_serial, rx_function, rx_disc_h);
+    rx_function &= 0xF;                      // note command array size!
+    Serial.printf(" sender: 0x%x, counter: %i button: %s\n", rx_serial, rx_counter, commands[rx_function]);
 
     // send mqtt message with received Data:
     if (mqtt_client.connected() && mqtt_send_radio_receive_all) {
+      rx_disc_low[0] = (decoded >> 24) & 0xFF;
+      rx_disc_low[1] = (decoded >> 16) & 0xFF;
+      rx_disc_low[2] = (decoded >> 8) & 0xFF;
+      rx_disc_low[3] = decoded & 0xFF;
       String Topic = "stat/" + config.mqtt_devicetopic + "/received";
       const char * msg = Topic.c_str();
       char payload[220];
@@ -320,10 +342,6 @@ void loop()
                rx_serial, rx_function, rx_disc_low[0], rx_disc_h, value, rx_disc_low[3], rx_device_key_lsb, rx_device_key_msb, decoded );
       mqtt_client.publish(msg, payload);
     }
-
-    rx_disc_h = 0;
-    rx_hopcode = 0;
-    rx_function = 0;
   }
 
   // If you do not use a MQTT broker so configure the address 0.0.0.0
@@ -332,7 +350,7 @@ void loop()
     if (WiFi.status() == WL_CONNECTED) {
       if (!mqtt_client.connected()) {
         // calculate time since last connection attempt
-        long now = millis();
+        uint32_t now = millis();
         // possible values of mqttLastReconnectAttempt:
         // 0  => never attempted to connect
         // >0 => at least one connect attempt was made
@@ -350,11 +368,11 @@ void loop()
 
   // run a CMD whenever a web_cmd event has been triggered
   if (web_cmd != "") {
-
+/*
     iset = true;
     detachInterrupt(RX_PORT); // Interrupt on change of RX_PORT
     delay(1);
-
+*/
     if (web_cmd == "up") {
       cmd_up(web_cmd_channel);
     } else if (web_cmd == "down") {
@@ -380,6 +398,7 @@ void loop()
     }
     web_cmd = "";
   }
+  ArduinoOTA.handle();
 } // void loop
 
 
@@ -392,16 +411,16 @@ void loop()
 //####################################################################
 void ICACHE_RAM_ATTR radio_rx_measure()
 {
-  static long LineUp, LineDown, Timeout;
-  long LowVal, HighVal;
+  static uint32_t LineUp, LineDown, Timeout;
+  uint32_t LowVal, HighVal;
   int pinstate = digitalRead(RX_PORT); // Read current pin state
-  if (micros() - Timeout > 3500) {
-    pbwrite = 0;
+  if (micros() - Timeout > 3500) {     // header detected
+    pbwrite = 0;                       // reset buffer
   }
-  if (pinstate)                       // pin is now HIGH, was low
+  if (pinstate)                        // pin is now HIGH, was low
   {
-    LineUp = micros();                // Get actual time in LineUp
-    LowVal = LineUp - LineDown;       // calculate the LOW pulse time
+    LineUp = micros();                 // Get actual time in LineUp
+    LowVal = LineUp - LineDown;        // calculate the LOW pulse time
     if (LowVal < debounce) return;
     if ((LowVal > 300) && (LowVal < 4300))
     {
@@ -420,95 +439,97 @@ void ICACHE_RAM_ATTR radio_rx_measure()
   }
   else
   {
-    LineDown = micros();          // line went LOW after being HIGH
-    HighVal = LineDown - LineUp;  // calculate the HIGH pulse time
+    LineDown = micros();               // line went LOW after being HIGH
+    HighVal = LineDown - LineUp;       // calculate the HIGH pulse time
     if (HighVal < debounce) return;
     if ((HighVal > 300) && (HighVal < 1000))
     {
-      hibuf[pbwrite] = HighVal;
+      highbuf[pbwrite] = HighVal;
     }
   }
 } // void ICACHE_RAM_ATTR radio_rx_measure
 
 //####################################################################
-// Generation of the encrypted message (Hopcode)
+// Generation the encrypted message (Hopcode)
 //####################################################################
-void keeloq () {
+uint32_t keeloq (byte disc) {
   Keeloq k(device_key_msb, device_key_lsb);
-  unsigned int result = (disc << 16) | devcnt;  // Append counter value to discrimination value
-  dec = k.encrypt(result);
-} // void keeloq
+  uint32_t result = (disc << 16) | devcnt;  // append counter value to discrimination value
+  return k.encrypt(result);
+} // uint32_t keeloq
 
 //####################################################################
 // Keygen generates the device crypt key in relation to the masterkey and provided serial number.
 // Here normal key-generation is used according to 00745a_c.PDF Appendix G.
 // https://github.com/hnhkj/documents/blob/master/KEELOQ/docs/AN745/00745a_c.pdf
 //####################################################################
-void keygen () {
-  Keeloq k(config.ulMasterMSB, config.ulMasterLSB);
-  uint64_t keylow = new_serial | 0x20000000;
-  unsigned long enc = k.decrypt(keylow);
-  device_key_lsb  = enc;              // Stores LSB devicekey 16Bit
-  keylow = new_serial | 0x60000000;
-  enc    = k.decrypt(keylow);
-  device_key_msb  = enc;              // Stores MSB devicekey 16Bit
-
-  Serial.printf(" created devicekey low: 0x%08x // high: 0x%08x\n", device_key_lsb, device_key_msb);
+void keygen (uint32_t serial) {
+  Keeloq k(config.ulMasterMSB, config.ulMasterLSB); // create Keeloq object
+  device_key_lsb  = k.decrypt(serial | 0x20000000); // decrypt devicekey lsb
+  device_key_msb  = k.decrypt(serial | 0x60000000); // decrypt devicekey msb
+  // Serial.printf(" keygen devicekey low: 0x%08x // high: 0x%08x\n", device_key_lsb, device_key_msb);
 } // void keygen
 
 //####################################################################
 // Simple TX routine. Repetitions for simulate continuous button press.
-// Send code two times. In case of one shutter did not "hear" the command.
+// Send code two times. In case a shutter did not "hear" the command.
 //####################################################################
-void radio_tx(int repetitions) {
-  pack = (button << 60) | (new_serial << 32) | dec;
+void radio_tx(int channel, byte command, int repetitions) {
+  uint32_t serial;
+  EEPROM.get(adresses[channel], serial);
+  byte disc_l = disc_low[channel];
+  byte disc = (disc_l << 8) | serials[channel];
+  uint32_t tx_hop = keeloq(disc);
+  uint64_t pack = (command << 60) | (serial << 32) | tx_hop;
   for (int a = 0; a < repetitions; a++)
   {
-    digitalWrite(TX_PORT, LOW);      // CC1101 in TX Mode+
+    digitalWrite(TX_PORT, LOW);        // CC1101 in TX Mode+
     delayMicroseconds(1150);
-    radio_tx_frame(13);              // change 28.01.2018 default 10
+    radio_tx_frame(13);                // change 28.01.2018 default 10
     delayMicroseconds(3500);
 
     for (int i = 0; i < 64; i++) {
 
-      int out = ((pack >> i) & 0x1); // Bitmask to get MSB and send it first
+      int out = ((pack >> i) & 0x1);   // Bitmask to get MSB and send it first
       if (out == 0x1)
       {
-        digitalWrite(TX_PORT, LOW);  // Simple encoding of bit state 1
+        digitalWrite(TX_PORT, LOW);    // Simple encoding of bit state 1
         delayMicroseconds(Lowpulse);
         digitalWrite(TX_PORT, HIGH);
         delayMicroseconds(Highpulse);
       }
       else
       {
-        digitalWrite(TX_PORT, LOW);  // Simple encoding of bit state 0
+        digitalWrite(TX_PORT, LOW);    // Simple encoding of bit state 0
         delayMicroseconds(Highpulse);
         digitalWrite(TX_PORT, HIGH);
         delayMicroseconds(Lowpulse);
       }
     }
-    radio_tx_group_h();              // Last 8Bit. For motor 8-16.
+    radio_tx_group_h(channel);         // Last 8Bit. For motor 8-16.
 
-    delay(16);                       // delay in loop context is save for wdt
+    delay(16);                         // delay in loop context is save for wdt
   }
 } // void radio_tx
 
 //####################################################################
-// Sending of high_group_bits 8-16
+// Sending high_group_bits 8-16
 //####################################################################
-void radio_tx_group_h() {
+void radio_tx_group_h(int channel) {
+  byte disc_h;
+  disc_h = disc_high[channel];
   for (int i = 0; i < 8; i++) {
-    int out = ((disc_h >> i) & 0x1); // Bitmask to get MSB and send it first
+    int out = ((disc_h >> i) & 0x1);   // Bitmask to get MSB and send it first
     if (out == 0x1)
     {
-      digitalWrite(TX_PORT, LOW);    // Simple encoding of bit state 1
+      digitalWrite(TX_PORT, LOW);      // Simple encoding of bit state 1
       delayMicroseconds(Lowpulse);
       digitalWrite(TX_PORT, HIGH);
       delayMicroseconds(Highpulse);
     }
     else
     {
-      digitalWrite(TX_PORT, LOW);    // Simple encoding of bit state 0
+      digitalWrite(TX_PORT, LOW);      // Simple encoding of bit state 0
       delayMicroseconds(Highpulse);
       digitalWrite(TX_PORT, HIGH);
       delayMicroseconds(Lowpulse);
@@ -519,51 +540,56 @@ void radio_tx_group_h() {
 //####################################################################
 // Generates sync-pulses
 //####################################################################
-void radio_tx_frame(int l) {
-  for (int i = 0; i < l; ++i) {
+void radio_tx_frame(int len) {
+  for (int i = 0; i < len; ++i) {
     digitalWrite(TX_PORT, LOW);
-    delayMicroseconds(400);          // change 28.01.2018 default highpulse
+    delayMicroseconds(400);            // change 28.01.2018 default highpulse
     digitalWrite(TX_PORT, HIGH);
-    delayMicroseconds(380);          // change 28.01.2018 default lowpulse
+    delayMicroseconds(380);            // change 28.01.2018 default lowpulse
   }
 } // void radio_tx_frame
 
 //####################################################################
 // Calculate device code from received serial number
 //####################################################################
-void rx_keygen () {
+void rx_keygen (uint32_t serial) {
   Keeloq k(config.ulMasterMSB, config.ulMasterLSB);
-  uint32_t keylow = rx_serial | 0x20000000;
-  unsigned long enc = k.decrypt(keylow);
-  rx_device_key_lsb  = enc;        // Stores LSB devicekey 16Bit
-  keylow = rx_serial | 0x60000000;
-  enc    = k.decrypt(keylow);
-  rx_device_key_msb  = enc;        // Stores MSB devicekey 16Bit
-
-  Serial.printf(" received devicekey low: 0x%08x // high: 0x%08x", rx_device_key_lsb, rx_device_key_msb);
+  rx_device_key_lsb = k.decrypt(serial | 0x20000000);
+  rx_device_key_msb = k.decrypt(serial | 0x60000000);
 } // void rx_keygen
 
 //####################################################################
-// Decoding of the hopping code
+// Decoding the hopping code
 //####################################################################
-void rx_decoder () {
+uint32_t rx_decoder (uint32_t rx_hopcode) {
   Keeloq k(rx_device_key_msb, rx_device_key_lsb);
-  unsigned int result = rx_hopcode;
-  decoded = k.decrypt(result);
-  rx_disc_low[0] = (decoded >> 24) & 0xFF;
-  rx_disc_low[1] = (decoded >> 16) & 0xFF;
-  rx_disc_low[2] = (decoded >> 8) & 0xFF;
-  rx_disc_low[3] = decoded & 0xFF;
+  return k.decrypt(rx_hopcode);
+} // uint32_t rx_decoder
 
-  Serial.printf(" // decoded: 0x%08x\n", decoded);
-} // void rx_decoder
+//####################################################################
+// transmit one command
+//####################################################################
+void tx_command(int channel, byte command, int repetitions)
+{
+  uint32_t serial;
+  EEPROM.get(adresses[channel], serial);   // get the stored serial number
+  keygen(serial);                          // generate key for this channel
+  entertx();                               // enter transmit mode
+  radio_tx(channel, command, repetitions); // transmit the command
+  EEPROM.get(cntadr, devcnt);              // load last device counter
+  devcnt++;                                // increment the counter
+  devcnt_handler(false);                   // store new device counter
+  enterrx();                               // enter receive mode again
+  WriteLog("[INFO] - command " + (String)commands[command] + " for channel " + (String)channel + " (" + config.channel_name[channel] + ") sent", true);
+} // void tx_command
 
 //####################################################################
 // calculate RSSI value (Received Signal Strength Indicator)
 //####################################################################
-void ReadRSSI()
+byte ReadRSSI()
 {
   byte rssi = 0;
+  byte value = 0;
   rssi = (cc1101.readReg(CC1101_RSSI, CC1101_STATUS_REGISTER));
   if (rssi >= 128)
   {
@@ -576,14 +602,15 @@ void ReadRSSI()
     value = rssi / 2;
     value += 74;
   }
-  Serial.print(" CC1101_RSSI ");
-  Serial.println(value);
-} // void ReadRSSI
+  return value;
+} // byte ReadRSSI
 
 //####################################################################
 // put CC1101 to receive mode
 //####################################################################
 void enterrx() {
+  byte marcState;
+  uint32_t rx_time;
   cc1101.setRxState();
   delay(2);
   rx_time = micros();
@@ -597,6 +624,8 @@ void enterrx() {
 // put CC1101 to send mode
 //####################################################################
 void entertx() {
+  byte marcState;
+  uint32_t rx_time;
   cc1101.setTxState();
   delay(2);
   rx_time = micros();
@@ -641,7 +670,6 @@ bool handleFileRead(String path) {
   return false;                                         // If the file doesn't exist, return false
 } // bool handleFileRead
 
-
 //++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 // MQTT functions group
 //++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
@@ -661,9 +689,9 @@ void mqtt_callback(char* topic, byte* payload, unsigned int length) {
 
   // extract channel id from topic name
   int channel = 999;
-  char * token = strtok(topic, "/");  // initialize token
-  token = strtok(NULL, "/");          // now token = 2nd token
-  token = strtok(NULL, "/");          // now token = 3rd token, "shutter" or so
+  char * token = strtok(topic, "/");   // initialize token
+  token = strtok(NULL, "/");           // now token = 2nd token
+  token = strtok(NULL, "/");           // now token = 3rd token, "shutter" or so
   if (debug_mqtt) Serial.printf("command token: %s\n", token);
   if (strncmp(token, "shutter", 7) == 0) {
     token = strtok(NULL, "/");
@@ -688,11 +716,11 @@ void mqtt_callback(char* topic, byte* payload, unsigned int length) {
   WriteLog(cmd, true);
 
   if (channel <= 15) {
-
+/*
     iset = true;
     detachInterrupt(RX_PORT); // Interrupt @Inputpin
     delay(1);
-
+*/
     if (cmd == "UP" || cmd == "0") {
       cmd_up(channel);
     } else if (cmd == "DOWN"  || cmd == "100") {
@@ -745,7 +773,7 @@ void mqtt_send_percent_closed_state(int channelNum, int percent, String command)
     const char * msg = Topic.c_str();
     mqtt_client.publish(msg, percentstr);
   }
-  WriteLog("[INFO] - command " + command + " for channel " + (String)channelNum + " (" + config.channel_name[channelNum] + ") sent.", true);
+//  WriteLog("[INFO] - command " + command + " for channel " + (String)channelNum + " (" + config.channel_name[channelNum] + ") sent", true);
 } // void mqtt_send_percent_closed_state
 
 //####################################################################
@@ -755,7 +783,7 @@ void mqtt_send_config() {
   String Payload;
   int configCnt = 0, lineCnt = 0;
   char numBuffer[25];
-
+  uint32_t new_serial;
   if (mqtt_client.connected()) {
 
     // send config of the shutter channels
@@ -808,7 +836,6 @@ void mqtt_send_config_line(int & counter, String Payload) {
   yield();
 } // void mqtt_send_config_line
 
-
 //++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 // execute cmd_ functions group
 //++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
@@ -817,135 +844,50 @@ void mqtt_send_config_line(int & counter, String Payload) {
 // function to move the shutter up
 //####################################################################
 void cmd_up(int channel) {
-  EEPROM.get(adresses[channel], new_serial);
-  EEPROM.get(cntadr, devcnt);
-  button = 0x8;
-  disc_l = disc_low[channel];
-  disc_h = disc_high[channel];
-  disc = (disc_l << 8) | serials[channel];
-  rx_disc_low[0]  = disc_l;
-  rx_disc_high[0] = disc_h;
-  keygen();
-  keeloq();
-  entertx();
-  radio_tx(2);
-  enterrx();
-  rx_function = 0x8;
-  rx_serial_array[0] = (new_serial >> 24) & 0xFF;
-  rx_serial_array[1] = (new_serial >> 16) & 0xFF;
-  rx_serial_array[2] = (new_serial >> 8) & 0xFF;
-  rx_serial_array[3] = new_serial & 0xFF;
+  tx_command(channel, CMD_UP, 2);
+//  rx_function = 0x8;
   mqtt_send_percent_closed_state(channel, 0, "UP");
-  devcnt_handler(true);
+//  devcnt_handler(true);
 } // void cmd_up
 
 //####################################################################
 // function to move the shutter down
 //####################################################################
 void cmd_down(int channel) {
-  EEPROM.get(adresses[channel], new_serial);
-  EEPROM.get(cntadr, devcnt);
-  button = 0x2;
-  disc_l = disc_low[channel];
-  disc_h = disc_high[channel];
-  disc = (disc_l << 8) | serials[channel];
-  rx_disc_low[0]  = disc_l;
-  rx_disc_high[0] = disc_h;
-  keygen();
-  keeloq();  // Generate encrypted message 32Bit hopcode
-  entertx();
-  radio_tx(2); // Call TX routine
-  enterrx();
-  rx_function = 0x2;
-  rx_serial_array[0] = (new_serial >> 24) & 0xFF;
-  rx_serial_array[1] = (new_serial >> 16) & 0xFF;
-  rx_serial_array[2] = (new_serial >> 8) & 0xFF;
-  rx_serial_array[3] = new_serial & 0xFF;
+  tx_command(channel, CMD_DOWN, 2);
+//  rx_function = 0x2;
   mqtt_send_percent_closed_state(channel, 100, "DOWN");
-  devcnt_handler(true);
 } // void cmd_down
 
 //####################################################################
 // function to stop the shutter
 //####################################################################
 void cmd_stop(int channel) {
-  EEPROM.get(adresses[channel], new_serial);
-  EEPROM.get(cntadr, devcnt);
-  button = 0x4;
-  disc_l = disc_low[channel];
-  disc_h = disc_high[channel];
-  disc = (disc_l << 8) | serials[channel];
-  rx_disc_low[0]  = disc_l;
-  rx_disc_high[0] = disc_h;
-  keygen();
-  keeloq();
-  entertx();
-  radio_tx(2);
-  enterrx();
-  rx_function = 0x4;
-  rx_serial_array[0] = (new_serial >> 24) & 0xFF;
-  rx_serial_array[1] = (new_serial >> 16) & 0xFF;
-  rx_serial_array[2] = (new_serial >> 8) & 0xFF;
-  rx_serial_array[3] = new_serial & 0xFF;
-  WriteLog("[INFO] - command STOP for channel " + (String)channel + " (" + config.channel_name[channel] + ") sent.", true);
-  devcnt_handler(true);
+  tx_command(channel, CMD_STOP, 2);
+//  rx_function = 0x4;
+//  WriteLog("[INFO] - command STOP for channel " + (String)channel + " (" + config.channel_name[channel] + ") sent.", true);
+//  devcnt_handler(true);
 } // void cmd_stop
 
 //####################################################################
 // function to move shutter to shade position
 //####################################################################
 void cmd_shade(int channel) {
-  EEPROM.get(adresses[channel], new_serial);
-  EEPROM.get(cntadr, devcnt);
-  button = 0x4;
-  disc_l = disc_low[channel];
-  disc_h = disc_high[channel];
-  disc = (disc_l << 8) | serials[channel];
-  rx_disc_low[0]  = disc_l;
-  rx_disc_high[0] = disc_h;
-  keygen();
-  keeloq();
-  entertx();
-  radio_tx(20);
-  enterrx();
-  rx_function = 0x3;
-  rx_serial_array[0] = (new_serial >> 24) & 0xFF;
-  rx_serial_array[1] = (new_serial >> 16) & 0xFF;
-  rx_serial_array[2] = (new_serial >> 8) & 0xFF;
-  rx_serial_array[3] = new_serial & 0xFF;
+  tx_command(channel, CMD_STOP, 20);
+//  rx_function = 0x3;
   mqtt_send_percent_closed_state(channel, 90, "SHADE");
-  devcnt_handler(true);
 } // void cmd_shade
 
 //####################################################################
 // function to set the learn/set the shade position
 //####################################################################
 void cmd_set_shade_position(int channel) {
-  EEPROM.get(adresses[channel], new_serial);
-  EEPROM.get(cntadr, devcnt);
-  button = 0x4;
-  disc_l = disc_low[channel];
-  disc_h = disc_high[channel];
-  disc = (disc_l << 8) | serials[channel];
-  rx_disc_low[0]  = disc_l;
-  rx_disc_high[0] = disc_h;
-  keygen();
-
   for (int i = 0; i < 4; i++) {
-    entertx();
-    keeloq();
-    radio_tx(1);
-    devcnt++;
-    enterrx();
+    tx_command(channel, CMD_STOP, 1);
     delay(300);
   }
-  rx_function = 0x6;
-  rx_serial_array[0] = (new_serial >> 24) & 0xFF;
-  rx_serial_array[1] = (new_serial >> 16) & 0xFF;
-  rx_serial_array[2] = (new_serial >> 8) & 0xFF;
-  rx_serial_array[3] = new_serial & 0xFF;
+//  rx_function = 0x6;
   WriteLog("[INFO] - command SET SHADE for channel " + (String)channel + " (" + config.channel_name[channel] + ") sent.", true);
-  devcnt_handler(false);
   delay(2000); // Safety time to prevent accidentally erase of end-points.
 } // void cmd_set_shade_position
 
@@ -955,31 +897,14 @@ void cmd_set_shade_position(int channel) {
 //####################################################################
 void cmd_learn(int channel) {
   WriteLog("[INFO] - putting channel " +  (String) channel + " into learn mode ...", false);
-  new_serial = EEPROM.get(adresses[channel], new_serial);
-  EEPROM.get(cntadr, devcnt);
   if (config.learn_mode == true)
-    button = 0xA;                           // New learn method. Up+Down followd by Stop.
+    tx_command(channel, CMD_UP+CMD_DOWN, 1);     // New learn method. Up+Down followd by Stop.
   else
-    button = 0x1;                           // Old learn method for receiver before Mfg date 2010.
-  disc_l = disc_low[channel] ;
-  disc_h = disc_high[channel];
-  disc = (disc_l << 8) | serials[channel];
-  keygen();
-  keeloq();
-  entertx();
-  radio_tx(1);
-  enterrx();
-  devcnt++;
+    tx_command(channel, CMD_LEARN, 1);           // Old learn method for receiver before Mfg date 2010.
   if (config.learn_mode == true) {
     delay(1000);
-    button = 0x4;   // Stop
-    keeloq();
-    entertx();
-    radio_tx(1);
-    enterrx();
-    devcnt++;
+    tx_command(channel, CMD_STOP, 1);
   }
-  devcnt_handler(false);
   WriteLog("Channel learned!", true);
 } // void cmd_learn
 
@@ -987,19 +912,8 @@ void cmd_learn(int channel) {
 // function to send UP+DOWN button at same time
 //####################################################################
 void cmd_updown(int channel) {
-  new_serial = EEPROM.get(adresses[channel], new_serial);
-  EEPROM.get(cntadr, devcnt);
-  button = 0xA;
-  disc_l = disc_low[channel] ;
-  disc_h = disc_high[channel];
-  disc = (disc_l << 8) | serials[channel];
-  keygen();
-  keeloq();
-  entertx();
-  radio_tx(1);
-  enterrx();
-  devcnt_handler(true);
-  WriteLog("[INFO] - command UPDOWN for channel " + (String)channel + " (" + config.channel_name[channel] + ") sent.", true);
+  tx_command(channel, CMD_UP+CMD_DOWN, 1);
+//  WriteLog("[INFO] - command UPDOWN for channel " + (String)channel + " (" + config.channel_name[channel] + ") sent.", true);
 } // void cmd_updown
 
 //####################################################################
@@ -1069,7 +983,7 @@ void cmd_generate_serials(uint32_t sn) {
   WriteLog("[CFG ] - Generate serial numbers starting from" + String(sn), true);
   uint32_t z = sn;
   for (uint32_t i = 0; i <= 15; ++i) { // generate 16 serial numbers and storage in EEPROM
-    EEPROM.put(adresses[i], z);   // Serial 4Bytes
+    EEPROM.put(adresses[i], z);        // Serial 4Bytes
     z++;
   }
   devcnt = 0;
