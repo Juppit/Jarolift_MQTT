@@ -783,7 +783,7 @@ void mqtt_send_config() {
   String Payload;
   int configCnt = 0, lineCnt = 0;
   char numBuffer[25];
-  uint32_t new_serial;
+  uint32_t serial;
   if (mqtt_client.connected()) {
 
     // send config of the shutter channels
@@ -794,8 +794,8 @@ void mqtt_send_config() {
         } else {
           Payload += ", ";
         }
-        EEPROM.get(adresses[channelNum], new_serial);
-        sprintf(numBuffer, "0x%08x", new_serial);
+        EEPROM.get(adresses[channelNum], serial);
+        sprintf(numBuffer, "0x%08x", serial);
         Payload += "{\"id\":" + String(channelNum) + ", \"name\":\"" + config.channel_name[channelNum] + "\", "
                    + "\"serial\":\"" + numBuffer +  "\"}";
         lineCnt++;
