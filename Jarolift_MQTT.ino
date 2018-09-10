@@ -79,8 +79,8 @@ extern "C" {
 #define Lowpulse         400    // Defines pulse-width in microseconds. Adapt for your use...
 #define Highpulse        800
 
-uint32_t device_key_msb       = 0x0; // stores cryptkey MSB
-uint32_t device_key_lsb       = 0x0; // stores cryptkey LSB
+uint32_t device_key_msb  = 0x0; // stores cryptkey MSB
+uint32_t device_key_lsb  = 0x0; // stores cryptkey LSB
 
 byte disc_low[16]        = {0x1, 0x2, 0x4, 0x8, 0x10, 0x20, 0x40, 0x80, 0x0, 0x0, 0x0, 0x0, 0x0,  0x0,  0x0,  0x0};
 byte disc_high[16]       = {0x0, 0x0, 0x0, 0x0, 0x0,  0x0,  0x0,  0x0, 0x1, 0x2, 0x4, 0x8, 0x10, 0x20, 0x40, 0x80};
@@ -101,13 +101,13 @@ char commands[16][8] {"0","learn","down","3","stop","5","6","7","up","9","up+dow
 #define TX_PORT            4              // Outputport for transmission
 #define RX_PORT            5              // Inputport for reception
 
-uint32_t rx_device_key_msb    = 0x0;           // stores cryptkey MSB
-uint32_t rx_device_key_lsb    = 0x0;           // stores cryptkey LSB
+uint32_t rx_device_key_msb = 0x0;         // stores cryptkey MSB
+uint32_t rx_device_key_lsb = 0x0;         // stores cryptkey LSB
 
 volatile byte pbwrite;
-volatile uint32_t lowbuf[bufsize];    // ring buffer storing LOW pulse lengths
-volatile uint32_t highbuf[bufsize];   // ring buffer storing HIGH pulse lengths
-volatile bool rx_full = false;             // flag for buffer is full
+volatile uint32_t lowbuf[bufsize];        // ring buffer storing LOW pulse lengths
+volatile uint32_t highbuf[bufsize];       // ring buffer storing HIGH pulse lengths
+volatile bool rx_full = false;            // flag for buffer is full
 
 boolean time_is_set_first = true;
 
@@ -129,7 +129,10 @@ void setup()
   settimeofday_cb(time_is_set);
   updateNTP(); // Init the NTP time
   WriteLog("[INFO] - starting Jarolift Dongle " + (String)PROGRAM_VERSION, true);
-  WriteLog("[INFO] - ESP-ID " + (String)ESP.getChipId() + " // ESP-Core " + ESP.getCoreVersion() + " // SDK Version " + ESP.getSdkVersion(), true);
+  char chipId[12];
+  sprintf(chipId, "0x%06x", ESP.getChipId());
+  WriteLog("[INFO] - ESP-ID " + (String)chipId + " // ESP-Core " + ESP.getCoreVersion() + " // SDK Version " + ESP.getSdkVersion(), true);
+  //WriteLog("[INFO] - ESP-ID " + (String)ESP.getChipId() + " // ESP-Core " + ESP.getCoreVersion() + " // SDK Version " + ESP.getSdkVersion(), true);
 
   // callback functions for WiFi connect and disconnect
   // placed as early as possible in the setup() function to get the connect
@@ -275,9 +278,6 @@ void loop()
   // check if first pulse is a header and RX buffer is full
   if ((lowbuf[0] > 3650) && (lowbuf[0] < 4300) && (pbwrite >= 65) && (pbwrite <= 75)) {    // Decode received data...
     byte value = ReadRSSI();
-    //    if (debug_log_radio_receive_all)
-    LogTime();
-    Serial.print("[INFO] - received data (RSSI: " + (String)value + ")");
     rx_full = true;
     pbwrite = 0;
 
@@ -326,7 +326,19 @@ void loop()
     rx_counter = decoded & 0xFFFF;           // mask out the counter value
 
     rx_function &= 0xF;                      // note command array size!
-    Serial.printf(" sender: 0x%x, counter: %i button: %s\n", rx_serial, rx_counter, commands[rx_function]);
+    uint32_t serial = config.serial_number;  // this is the first serial number
+    if (serial == (rx_serial & 0xfff0)) {    // check if this is our own number
+      int channel = rx_serial & 0xf;
+        WriteLog("[INFO] - received command for shutter: " + (String)channel + config.channel_name[channel], true);
+    } else {
+      //if (debug_log_radio_receive_all)
+      {
+        char line[60];
+        snprintf(line, sizeof(line), " sender: 0x%06x, counter: %i button: %s",
+                 rx_serial, rx_counter, commands[rx_function]);
+        WriteLog("[INFO] - received data (RSSI: " + (String)value + line, true);
+      }
+    }
 
     // send mqtt message with received Data:
     if (mqtt_client.connected() && mqtt_send_radio_receive_all) {
@@ -467,7 +479,6 @@ void keygen (uint32_t serial) {
   Keeloq k(config.ulMasterMSB, config.ulMasterLSB); // create Keeloq object
   device_key_lsb  = k.decrypt(serial | 0x20000000); // decrypt devicekey lsb
   device_key_msb  = k.decrypt(serial | 0x60000000); // decrypt devicekey msb
-  // Serial.printf(" keygen devicekey low: 0x%08x // high: 0x%08x\n", device_key_lsb, device_key_msb);
 } // void keygen
 
 //####################################################################
@@ -480,7 +491,9 @@ void radio_tx(int channel, byte command, int repetitions) {
   byte disc_l = disc_low[channel];
   byte disc = (disc_l << 8) | serials[channel];
   uint32_t tx_hop = keeloq(disc);
-  uint64_t pack = (command << 60) | (serial << 32) | tx_hop;
+  uint64_t command_long = command;     // 64bit to shift left
+  uint64_t serial_long = serial;       // 64bit to shift left
+  uint64_t pack = (command_long << 60) | (serial_long << 32) | tx_hop;
   for (int a = 0; a < repetitions; a++)
   {
     digitalWrite(TX_PORT, LOW);        // CC1101 in TX Mode+
@@ -574,9 +587,9 @@ void tx_command(int channel, byte command, int repetitions)
   uint32_t serial;
   EEPROM.get(adresses[channel], serial);   // get the stored serial number
   keygen(serial);                          // generate key for this channel
+  EEPROM.get(cntadr, devcnt);              // load last device counter
   entertx();                               // enter transmit mode
   radio_tx(channel, command, repetitions); // transmit the command
-  EEPROM.get(cntadr, devcnt);              // load last device counter
   devcnt++;                                // increment the counter
   devcnt_handler(false);                   // store new device counter
   enterrx();                               // enter receive mode again
@@ -772,8 +785,8 @@ void mqtt_send_percent_closed_state(int channelNum, int percent, String command)
     String Topic = "stat/" + config.mqtt_devicetopic + "/shutter/" + (String)channelNum;
     const char * msg = Topic.c_str();
     mqtt_client.publish(msg, percentstr);
+    WriteLog("[INFO] - command " + command + " for channel " + (String)channelNum + " (" + config.channel_name[channelNum] + ") sent", true);
   }
-//  WriteLog("[INFO] - command " + command + " for channel " + (String)channelNum + " (" + config.channel_name[channelNum] + ") sent", true);
 } // void mqtt_send_percent_closed_state
 
 //####################################################################
@@ -847,7 +860,6 @@ void cmd_up(int channel) {
   tx_command(channel, CMD_UP, 2);
 //  rx_function = 0x8;
   mqtt_send_percent_closed_state(channel, 0, "UP");
-//  devcnt_handler(true);
 } // void cmd_up
 
 //####################################################################
@@ -865,8 +877,6 @@ void cmd_down(int channel) {
 void cmd_stop(int channel) {
   tx_command(channel, CMD_STOP, 2);
 //  rx_function = 0x4;
-//  WriteLog("[INFO] - command STOP for channel " + (String)channel + " (" + config.channel_name[channel] + ") sent.", true);
-//  devcnt_handler(true);
 } // void cmd_stop
 
 //####################################################################
@@ -896,7 +906,7 @@ void cmd_set_shade_position(int channel) {
 // send learning packet.
 //####################################################################
 void cmd_learn(int channel) {
-  WriteLog("[INFO] - putting channel " +  (String) channel + " into learn mode ...", false);
+  WriteLog("[INFO] - putting channel " +  (String) channel + " into learn mode...", true);
   if (config.learn_mode == true)
     tx_command(channel, CMD_UP+CMD_DOWN, 1);     // New learn method. Up+Down followd by Stop.
   else
@@ -905,7 +915,7 @@ void cmd_learn(int channel) {
     delay(1000);
     tx_command(channel, CMD_STOP, 1);
   }
-  WriteLog("Channel learned!", true);
+  WriteLog("[INFO] - channel " +  (String) channel + " learned!", true);
 } // void cmd_learn
 
 //####################################################################
@@ -913,7 +923,6 @@ void cmd_learn(int channel) {
 //####################################################################
 void cmd_updown(int channel) {
   tx_command(channel, CMD_UP+CMD_DOWN, 1);
-//  WriteLog("[INFO] - command UPDOWN for channel " + (String)channel + " (" + config.channel_name[channel] + ") sent.", true);
 } // void cmd_updown
 
 //####################################################################
@@ -982,7 +991,7 @@ void cmd_restart() {
 void cmd_generate_serials(uint32_t sn) {
   WriteLog("[CFG ] - Generate serial numbers starting from" + String(sn), true);
   uint32_t z = sn;
-  for (uint32_t i = 0; i <= 15; ++i) { // generate 16 serial numbers and storage in EEPROM
+  for (int i = 0; i <= 15; ++i) {      // generate 16 serial numbers and storage in EEPROM
     EEPROM.put(adresses[i], z);        // Serial 4Bytes
     z++;
   }
