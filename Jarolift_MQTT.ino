@@ -329,7 +329,7 @@ void loop()
     uint32_t serial = config.serial_number;  // this is the first serial number
     if (serial == (rx_serial & 0xfff0)) {    // check if this is our own number
       int channel = rx_serial & 0xf;
-        WriteLog("[INFO] - received command for shutter: " + (String)channel + config.channel_name[channel], true);
+        WriteLog("[INFO] - received command for channel " + (String)channel + config.channel_name[channel], true);
     } else {
       //if (debug_log_radio_receive_all)
       {
@@ -385,6 +385,7 @@ void loop()
     detachInterrupt(RX_PORT); // Interrupt on change of RX_PORT
     delay(1);
 */
+//    WriteLog("[INFO] - received web_cmd for channel " + String(web_cmd_channel)+ " command: " + web_cmd, true);
     if (web_cmd == "up") {
       cmd_up(web_cmd_channel);
     } else if (web_cmd == "down") {
@@ -593,7 +594,7 @@ void tx_command(int channel, byte command, int repetitions)
   devcnt++;                                // increment the counter
   devcnt_handler(false);                   // store new device counter
   enterrx();                               // enter receive mode again
-  WriteLog("[INFO] - command " + (String)commands[command] + " for channel " + (String)channel + " (" + config.channel_name[channel] + ") sent", true);
+  WriteLog("[INFO] - sent to channel " + (String)channel + " (" + config.channel_name[channel] + ") command: " + (String)commands[command], true);
 } // void tx_command
 
 //####################################################################
@@ -785,7 +786,7 @@ void mqtt_send_percent_closed_state(int channelNum, int percent, String command)
     String Topic = "stat/" + config.mqtt_devicetopic + "/shutter/" + (String)channelNum;
     const char * msg = Topic.c_str();
     mqtt_client.publish(msg, percentstr);
-    WriteLog("[INFO] - command " + command + " for channel " + (String)channelNum + " (" + config.channel_name[channelNum] + ") sent", true);
+    WriteLog("[INFO] - MQTT command " + command + " for channel " + (String)channelNum + " (" + config.channel_name[channelNum] + ") sent", true);
   }
 } // void mqtt_send_percent_closed_state
 
@@ -835,6 +836,7 @@ void mqtt_send_config() {
               + "\"devicecounter\":" + (String)numBuffer + ", "
               + "\"new_learn_mode\":" + (String)config.learn_mode + "}";
     mqtt_send_config_line(configCnt, Payload);
+    WriteLog("[INFO] - MQTT command send_config done", true);
   } // if (mqtt_client.connected())
 } // void mqtt_send_config
 
@@ -883,21 +885,24 @@ void cmd_stop(int channel) {
 // function to move shutter to shade position
 //####################################################################
 void cmd_shade(int channel) {
+  WriteLog("[INFO] - putting channel " + (String)channel + " (" + config.channel_name[channel] + ") into mode shade...", true);
   tx_command(channel, CMD_STOP, 20);
 //  rx_function = 0x3;
   mqtt_send_percent_closed_state(channel, 90, "SHADE");
+  WriteLog("[INFO] - end for channel " + (String)channel + " (" + config.channel_name[channel] + ") mode shade", true);
 } // void cmd_shade
 
 //####################################################################
 // function to set the learn/set the shade position
 //####################################################################
 void cmd_set_shade_position(int channel) {
+  WriteLog("[INFO] - putting channel " + (String)channel + " (" + config.channel_name[channel] + ") into mode set shade...", true);
   for (int i = 0; i < 4; i++) {
     tx_command(channel, CMD_STOP, 1);
     delay(300);
   }
 //  rx_function = 0x6;
-  WriteLog("[INFO] - command SET SHADE for channel " + (String)channel + " (" + config.channel_name[channel] + ") sent.", true);
+  WriteLog("[INFO] - end for channel " + (String)channel + " (" + config.channel_name[channel] + ") mode set shade", true);
   delay(2000); // Safety time to prevent accidentally erase of end-points.
 } // void cmd_set_shade_position
 
@@ -906,7 +911,7 @@ void cmd_set_shade_position(int channel) {
 // send learning packet.
 //####################################################################
 void cmd_learn(int channel) {
-  WriteLog("[INFO] - putting channel " +  (String) channel + " into learn mode...", true);
+  WriteLog("[INFO] - putting channel " +  (String) channel +  " (" + config.channel_name[channel] + ") into learning mode...", true);
   if (config.learn_mode == true)
     tx_command(channel, CMD_UP+CMD_DOWN, 1);     // New learn method. Up+Down followd by Stop.
   else
@@ -915,7 +920,7 @@ void cmd_learn(int channel) {
     delay(1000);
     tx_command(channel, CMD_STOP, 1);
   }
-  WriteLog("[INFO] - channel " +  (String) channel + " learned!", true);
+  WriteLog("[INFO] - end for channel " +  (String) channel +  " (" + config.channel_name[channel] + ") mode learning", true);
 } // void cmd_learn
 
 //####################################################################
