@@ -88,12 +88,15 @@ byte serials[16]         = {0x0, 0x1, 0x2, 0x3, 0x4,  0x5,  0x6,  0x7, 0x8, 0x9,
 byte adresses[]          = {5, 11, 17, 23, 29, 35, 41, 47, 53, 59, 65, 71, 77, 85, 91, 97 }; // Defines start addresses of channel data stored in EEPROM 4bytes s/n.
 
 // Commands
-#define CMD_UP    0x8
-#define CMD_STOP  0x4
-#define CMD_DOWN  0x2
-#define CMD_LEARN 0x1
+#define CMD_UP         0x8
+#define CMD_SET_SHADE  0x6
+#define CMD_STOP_SHADE 0x5
+#define CMD_STOP       0x4
+#define CMD_SHADE      0x3
+#define CMD_DOWN       0x2
+#define CMD_LEARN      0x1
 
-char commands[16][8] {"0","learn","down","3","stop","5","6","7","up","9","up+down","11","12","13","14","15"};
+char commands[16][12] {"0","learn","down","shade","stop","stop_shade","set_shade","7","up","9","up+down","11","12","13","14","15"};
 
 // RX variables and defines
 #define debounce         200              // Ignoring short pulses in reception... no clue if required and if it makes sense ;)
@@ -586,15 +589,25 @@ uint32_t rx_decoder (uint32_t rx_hopcode) {
 void tx_command(int channel, byte command, int repetitions)
 {
   uint32_t serial;
+  byte cmd_new = command;
+  if (cmd_new == CMD_STOP_SHADE)
+    cmd_new = CMD_STOP;
+  if (cmd_new == CMD_SET_SHADE)
+    cmd_new = CMD_DOWN;
+  if (cmd_new == CMD_SHADE)
+    cmd_new = CMD_DOWN;
   EEPROM.get(adresses[channel], serial);   // get the stored serial number
   keygen(serial);                          // generate key for this channel
   EEPROM.get(cntadr, devcnt);              // load last device counter
   entertx();                               // enter transmit mode
-  radio_tx(channel, command, repetitions); // transmit the command
+  radio_tx(channel, cmd_new, repetitions); // transmit the command
   devcnt++;                                // increment the counter
   devcnt_handler(false);                   // store new device counter
   enterrx();                               // enter receive mode again
-  WriteLog("[INFO] - sent to channel " + (String)channel + " (" + config.channel_name[channel] + ") command: " + (String)commands[command], true);
+  WriteLog("[INFO] - sent to channel " + (String)channel + " (" + config.channel_name[channel] + ") command: " + (String)commands[cmd_new], false);
+  if (command != cmd_new)
+    WriteLog("(" + (String)commands[command] + ")", false);
+  WriteLog("", true);
 } // void tx_command
 
 //####################################################################
@@ -860,7 +873,6 @@ void mqtt_send_config_line(int & counter, String Payload) {
 //####################################################################
 void cmd_up(int channel) {
   tx_command(channel, CMD_UP, 2);
-//  rx_function = 0x8;
   mqtt_send_percent_closed_state(channel, 0, "UP");
 } // void cmd_up
 
@@ -869,7 +881,6 @@ void cmd_up(int channel) {
 //####################################################################
 void cmd_down(int channel) {
   tx_command(channel, CMD_DOWN, 2);
-//  rx_function = 0x2;
   mqtt_send_percent_closed_state(channel, 100, "DOWN");
 } // void cmd_down
 
@@ -878,32 +889,46 @@ void cmd_down(int channel) {
 //####################################################################
 void cmd_stop(int channel) {
   tx_command(channel, CMD_STOP, 2);
-//  rx_function = 0x4;
+  if (shadeLearn)
+  {
+    shadeLearn = false;
+    if ((shadeLearnTime > 0) && (shadeLearnTime < MAX_SHADE_TIME))
+    {
+      shadeTime[channel] = shadeLearnTime;
+      WriteLog("[INFO] - set for channel " + (String)channel + " (" + config.channel_name[channel] + ") shadeTime to " + (String)shadeTime[channel] + " ", true);
+    }
+  }
 } // void cmd_stop
 
 //####################################################################
 // function to move shutter to shade position
 //####################################################################
 void cmd_shade(int channel) {
-  WriteLog("[INFO] - putting channel " + (String)channel + " (" + config.channel_name[channel] + ") into mode shade...", true);
-  tx_command(channel, CMD_STOP, 20);
-//  rx_function = 0x3;
+  uint16_t seconds = 1;
+  //WriteLog("[INFO] - putting channel " + (String)channel + " (" + config.channel_name[channel] + ") into mode shade", true);
+  tx_command(channel, CMD_SHADE, 2);
+  WriteLog("[INFO] - use for channel " + (String)channel + " (" + config.channel_name[channel] + ") shadeTime " + (String)shadeTime[channel] + " ", false);
+  if ((shadeTime[channel] > 0) && (shadeTime[channel] < MAX_SHADE_TIME))
+    seconds = shadeTime[channel];
+  for (int i = 0; i < seconds; i++)
+  {
+    WriteLog(".", false);
+    delay(1000);
+  }
+  WriteLog("", true);
+  tx_command(channel, CMD_STOP_SHADE, 2);
   mqtt_send_percent_closed_state(channel, 90, "SHADE");
-  WriteLog("[INFO] - end for channel " + (String)channel + " (" + config.channel_name[channel] + ") mode shade", true);
 } // void cmd_shade
 
 //####################################################################
 // function to set the learn/set the shade position
 //####################################################################
 void cmd_set_shade_position(int channel) {
-  WriteLog("[INFO] - putting channel " + (String)channel + " (" + config.channel_name[channel] + ") into mode set shade...", true);
-  for (int i = 0; i < 4; i++) {
-    tx_command(channel, CMD_STOP, 1);
-    delay(300);
-  }
-//  rx_function = 0x6;
-  WriteLog("[INFO] - end for channel " + (String)channel + " (" + config.channel_name[channel] + ") mode set shade", true);
+  shadeLearnTime = 0;
+  shadeLearn = true;
+  tx_command(channel, CMD_SET_SHADE, 1);
   delay(2000); // Safety time to prevent accidentally erase of end-points.
+  WriteLog("[INFO] - wait on channel " + (String)channel + " (" + config.channel_name[channel] + ") for command stop", true);
 } // void cmd_set_shade_position
 
 //####################################################################

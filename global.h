@@ -91,6 +91,10 @@ struct strConfig {
   boolean set_devicecounter = false;
 } config;
 
+uint64_t shadeLearnTime = 0;              // used to determine the time to set shade position
+boolean shadeLearn = false;               // flag to indicate the modus learn shade position
+uint16_t shadeTime[16] = {0};             // learned shade time for each channel
+#define MAX_SHADE_TIME 50
 
 //####################################################################
 // Initalize log message array with empty strings
@@ -405,6 +409,7 @@ boolean highPulse = true;
 #define HEART_BEAT_CYCLE 4                       // HeartBeat cycle in seconds
 void HeartBeat()
 {
+  shadeLearnTime++;
   float pulse_on  = 0.05;                        // LED on for 50 milliseconds in normal mode
   float pulse_off = HEART_BEAT_CYCLE - pulse_on;
 
