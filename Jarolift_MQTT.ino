@@ -910,9 +910,13 @@ void cmd_shade(int channel) {
   uint16_t seconds = 1;
   //WriteLog("[INFO] - putting channel " + (String)channel + " (" + config.channel_name[channel] + ") into mode shade", true);
   tx_command(channel, CMD_SHADE, 2);
-  WriteLog("[INFO] - use for channel " + (String)channel + " (" + config.channel_name[channel] + ") shadeTime " + (String)config.shade_value[channel] + " ", false);
   if ((config.shade_value[channel] > 0) && (config.shade_value[channel] < MAX_SHADE_TIME))
     seconds = config.shade_value[channel];
+  else {                               // save "1" as new default value
+    EEPROM.put(ShadeValueAdr+channel, seconds);
+    EEPROM.commit();
+  }
+  WriteLog("[INFO] - use for channel " + (String)channel + " (" + config.channel_name[channel] + ") shadeTime " + (String)seconds + " ", false);
   for (int i = 0; i < seconds; i++)
   {
     WriteLog(".", false);
