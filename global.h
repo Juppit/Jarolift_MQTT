@@ -89,11 +89,11 @@ struct strConfig {
   String new_devicecounter = "";
   boolean set_and_generate_serial = false;
   boolean set_devicecounter = false;
+  byte shade_value[16];
 } config;
 
-uint64_t shadeLearnTime = 0;              // used to determine the time to set shade position
-boolean shadeLearn = false;               // flag to indicate the modus learn shade position
-uint16_t shadeTime[16] = {0};             // learned shade time for each channel
+uint64_t shade_learn_time = 0;            // used to determine the time to set shade position
+boolean shade_learn = false;              // flag to indicate the modus learn shade position
 #define MAX_SHADE_TIME 50
 
 //####################################################################
@@ -236,6 +236,24 @@ void WriteConfig()
   WriteStringToEEPROM(1200, config.channel_name[14]);
   WriteStringToEEPROM(1250, config.channel_name[15]);
 
+#define ShadeValueAdr 1350
+  EEPROM.write(1350, config.shade_value[0]);
+  EEPROM.write(1351, config.shade_value[1]);
+  EEPROM.write(1352, config.shade_value[2]);
+  EEPROM.write(1353, config.shade_value[3]);
+  EEPROM.write(1354, config.shade_value[4]);
+  EEPROM.write(1355, config.shade_value[5]);
+  EEPROM.write(1356, config.shade_value[6]);
+  EEPROM.write(1357, config.shade_value[7]);
+  EEPROM.write(1358, config.shade_value[8]);
+  EEPROM.write(1359, config.shade_value[9]);
+  EEPROM.write(1360, config.shade_value[10]);
+  EEPROM.write(1361, config.shade_value[11]);
+  EEPROM.write(1362, config.shade_value[12]);
+  EEPROM.write(1363, config.shade_value[13]);
+  EEPROM.write(1364, config.shade_value[14]);
+  EEPROM.write(1365, config.shade_value[15]);
+
   EEPROM.commit();
   delay(1000);
 } // void WriteConfig
@@ -317,6 +335,22 @@ boolean ReadConfig()
   if (config.cfgVersion == 2)
   { // read config parts of version 2
     config.mqtt_devicetopic = ReadStringFromEEPROM(1300, 20);
+    config.shade_value[0] = EEPROM.read(1350);
+    config.shade_value[1] = EEPROM.read(1351);
+    config.shade_value[2] = EEPROM.read(1352);
+    config.shade_value[3] = EEPROM.read(1353);
+    config.shade_value[4] = EEPROM.read(1354);
+    config.shade_value[5] = EEPROM.read(1355);
+    config.shade_value[6] = EEPROM.read(1356);
+    config.shade_value[7] = EEPROM.read(1357);
+    config.shade_value[8] = EEPROM.read(1358);
+    config.shade_value[9] = EEPROM.read(1359);
+    config.shade_value[10] = EEPROM.read(1360);
+    config.shade_value[11] = EEPROM.read(1361);
+    config.shade_value[12] = EEPROM.read(1362);
+    config.shade_value[13] = EEPROM.read(1363);
+    config.shade_value[14] = EEPROM.read(1364);
+    config.shade_value[15] = EEPROM.read(1365);
   } else
   { // upgrade config to version 2
     config.mqtt_devicetopic = "jarolift"; // default devicetopic
@@ -390,6 +424,9 @@ void InitializeConfigData()
     for ( int i = 0; i <= 15; i++ ) {
       config.channel_name[i] = "";
     }
+    for ( int i = 0; i <= 15; i++ ) {
+      config.shade_value[i] = 0;
+    }
     WriteConfig();
     WriteLog("[INFO] - default config applied", true);
   }
@@ -409,7 +446,7 @@ boolean highPulse = true;
 #define HEART_BEAT_CYCLE 4                       // HeartBeat cycle in seconds
 void HeartBeat()
 {
-  shadeLearnTime++;
+  shade_learn_time++;
   float pulse_on  = 0.05;                        // LED on for 50 milliseconds in normal mode
   float pulse_off = HEART_BEAT_CYCLE - pulse_on;
 

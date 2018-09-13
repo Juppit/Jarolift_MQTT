@@ -889,14 +889,17 @@ void cmd_down(int channel) {
 //####################################################################
 void cmd_stop(int channel) {
   tx_command(channel, CMD_STOP, 2);
-  if (shadeLearn)
+  if (shade_learn)
   {
-    shadeLearn = false;
-    if ((shadeLearnTime > 0) && (shadeLearnTime < MAX_SHADE_TIME))
-    {
-      shadeTime[channel] = shadeLearnTime;
-      WriteLog("[INFO] - set for channel " + (String)channel + " (" + config.channel_name[channel] + ") shadeTime to " + (String)shadeTime[channel] + " ", true);
-    }
+    shade_learn = false;
+    if (shade_learn_time < 0)
+      shade_learn_time = 0;
+    if (shade_learn_time >= MAX_SHADE_TIME)
+      shade_learn_time = MAX_SHADE_TIME;
+    config.shade_value[channel] = shade_learn_time;
+    EEPROM.put(ShadeValueAdr+channel, shade_learn_time);
+    EEPROM.commit();
+    WriteLog("[INFO] - set for channel " + (String)channel + " (" + config.channel_name[channel] + ") config.shade_value to " + (String)config.shade_value[channel] + " ", true);
   }
 } // void cmd_stop
 
@@ -907,9 +910,9 @@ void cmd_shade(int channel) {
   uint16_t seconds = 1;
   //WriteLog("[INFO] - putting channel " + (String)channel + " (" + config.channel_name[channel] + ") into mode shade", true);
   tx_command(channel, CMD_SHADE, 2);
-  WriteLog("[INFO] - use for channel " + (String)channel + " (" + config.channel_name[channel] + ") shadeTime " + (String)shadeTime[channel] + " ", false);
-  if ((shadeTime[channel] > 0) && (shadeTime[channel] < MAX_SHADE_TIME))
-    seconds = shadeTime[channel];
+  WriteLog("[INFO] - use for channel " + (String)channel + " (" + config.channel_name[channel] + ") shadeTime " + (String)config.shade_value[channel] + " ", false);
+  if ((config.shade_value[channel] > 0) && (config.shade_value[channel] < MAX_SHADE_TIME))
+    seconds = config.shade_value[channel];
   for (int i = 0; i < seconds; i++)
   {
     WriteLog(".", false);
@@ -924,8 +927,8 @@ void cmd_shade(int channel) {
 // function to set the learn/set the shade position
 //####################################################################
 void cmd_set_shade_position(int channel) {
-  shadeLearnTime = 0;
-  shadeLearn = true;
+  shade_learn_time = 0;
+  shade_learn = true;
   tx_command(channel, CMD_SET_SHADE, 1);
   delay(2000); // Safety time to prevent accidentally erase of end-points.
   WriteLog("[INFO] - wait on channel " + (String)channel + " (" + config.channel_name[channel] + ") for command stop", true);
