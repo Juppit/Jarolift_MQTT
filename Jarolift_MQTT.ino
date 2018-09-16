@@ -279,7 +279,7 @@ void loop()
   }
 
   // check if first pulse is a header and RX buffer is full
-  if ((lowbuf[0] > 3650) && (lowbuf[0] < 4300) && (pbwrite >= 65) && (pbwrite <= 75)) {    // Decode received data...
+  if ((lowbuf[0] > 3650) && (lowbuf[0] < 4300) && (pbwrite >= 66) && (pbwrite <= 75)) {    // Decode received data...
     byte value = ReadRSSI();
     rx_full = true;
     pbwrite = 0;
