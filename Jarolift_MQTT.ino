@@ -99,8 +99,8 @@ byte adresses[]          = {5, 11, 17, 23, 29, 35, 41, 47, 53, 59, 65, 71, 77, 8
 char commands[16][12] {"0","learn","down","shade","stop","stop_shade","set_shade","7","up","9","up+down","11","12","13","14","15"};
 
 // RX variables and defines
-#define debounce         200              // Ignoring short pulses in reception... no clue if required and if it makes sense ;)
-#define bufsize          216              // Pulsebuffer
+#define debounce         200              // Ignoring short pulses in reception... (in idle state we get o lot of glitches)
+#define MAX_BUFFER        76              // Pulsebuffer
 #define TX_PORT            4              // Outputport for transmission
 #define RX_PORT            5              // Inputport for reception
 
@@ -108,8 +108,8 @@ uint32_t rx_device_key_msb = 0x0;         // stores cryptkey MSB
 uint32_t rx_device_key_lsb = 0x0;         // stores cryptkey LSB
 
 volatile byte pbwrite;
-volatile uint32_t lowbuf[bufsize];        // ring buffer storing LOW pulse lengths
-volatile uint32_t highbuf[bufsize];       // ring buffer storing HIGH pulse lengths
+volatile uint32_t lowbuf[MAX_BUFFER+1];   // ring buffer storing LOW pulse lengths
+volatile uint32_t highbuf[MAX_BUFFER+1];  // ring buffer storing HIGH pulse lengths
 volatile bool rx_full = false;            // flag for buffer is full
 
 boolean time_is_set_first = true;
@@ -279,7 +279,7 @@ void loop()
   }
 
   // check if first pulse is a header and RX buffer is full
-  if ((lowbuf[0] > 3650) && (lowbuf[0] < 4300) && (pbwrite >= 66) && (pbwrite <= 75)) {    // Decode received data...
+  if ((lowbuf[0] > 3650) && (lowbuf[0] < 4300) && (pbwrite >= 66) && (pbwrite < MAX_BUFFER)) {    // Decode received data...
     byte value = ReadRSSI();
     rx_full = true;
     pbwrite = 0;
@@ -337,7 +337,7 @@ void loop()
       //if (debug_log_radio_receive_all)
       {
         char line[60];
-        snprintf(line, sizeof(line), " sender: 0x%06x, counter: %i button: %s",
+        snprintf(line, sizeof(line), ") sender: 0x%06x, counter: %i button: %s",
                  rx_serial, rx_counter, commands[rx_function]);
         WriteLog("[INFO] - received data (RSSI: " + (String)value + line, true);
       }
@@ -422,6 +422,7 @@ void loop()
 // CC1101 radio functions group
 //++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
+
 //####################################################################
 // Receive Routine
 //####################################################################
@@ -463,6 +464,8 @@ void ICACHE_RAM_ATTR radio_rx_measure()
       highbuf[pbwrite] = HighVal;
     }
   }
+  if (pbwrite > MAX_BUFFER)     // must not exceed buffer size
+    pbwrite = MAX_BUFFER;
 } // void ICACHE_RAM_ATTR radio_rx_measure
 
 //####################################################################
